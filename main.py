@@ -103,9 +103,10 @@ def collect_news_from_naver(target_date=None):
         return collect_news_from_rss()
 
     keywords = [
-        "금융", "증시", "주식", "환율",
-        "IT", "AI", "테크",
-        "삼성증권", "네이버", "은행"
+        "금융", "증시", "주식", "환율", "증권", "캐피탈", 
+        "IT", "AI", "테크", "스테이블코인", "디지털자산",
+        "삼성증권", "네이버", 
+        "하나은행", "우리은행", "은행", "기업은행",
     ]
 
     url = "https://openapi.naver.com/v1/search/news.json"
@@ -374,60 +375,95 @@ def add_to_notion(title, content, report_date_str):
                 i += 1
                 continue
 
-            block = None
-            
             # --- 블록 레벨 요소 처리 ---
 
             # 제목 (Headings)
             if stripped_line.startswith('# '):
                 text_content = stripped_line[2:]
                 block = {"object": "block", "type": "heading_1", "heading_1": {"rich_text": parse_inline_formatting(text_content)}}
+                children_blocks.append(block)
                 i += 1
+                continue
             elif stripped_line.startswith('## '):
                 text_content = stripped_line[3:]
                 block = {"object": "block", "type": "heading_2", "heading_2": {"rich_text": parse_inline_formatting(text_content)}}
+                children_blocks.append(block)
                 i += 1
+                continue
             elif stripped_line.startswith('### '):
                 text_content = stripped_line[4:]
                 block = {"object": "block", "type": "heading_3", "heading_3": {"rich_text": parse_inline_formatting(text_content)}}
+                children_blocks.append(block)
+                i += 1
+                continue
+
+            # 목록 그룹 처리 (Process a whole list at once)
+            is_numbered = re.match(r'^\d+[\.\)]\s', stripped_line)
+            is_bulleted = stripped_line.startswith(('- ', '* '))
+            if is_numbered or is_bulleted:
+                list_type_to_process = 'numbered' if is_numbered else 'bulleted'
+                
+                # Loop as long as we are in the same type of list
+                while i < len(lines):
+                    current_line_stripped = lines[i].strip()
+                    if not current_line_stripped:
+                        # empty line breaks the list
+                        break 
+                    
+                    is_current_line_numbered = re.match(r'^\d+[\.\)]\s', current_line_stripped)
+                    is_current_line_bulleted = current_line_stripped.startswith(('- ', '* '))
+
+                    # Break if list type changes or it's not a list item
+                    if (list_type_to_process == 'numbered' and not is_current_line_numbered) or \
+                       (list_type_to_process == 'bulleted' and not is_current_line_bulleted) or \
+                        current_line_stripped.startswith('#'):
+                        break
+
+                    # It's a valid item of the current list. Process it.
+                    if is_current_line_numbered:
+                        text_content = re.sub(r'^\d+[\.\)]\s', '', current_line_stripped)
+                        block_type = 'numbered_list_item'
+                    else:
+                        text_content = current_line_stripped[2:]
+                        block_type = 'bulleted_list_item'
+
+                    # Find multi-line content for this item
+                    item_content_end_index = i + 1
+                    while item_content_end_index < len(lines):
+                        next_line = lines[item_content_end_index]
+                        next_line_stripped = next_line.strip()
+                        # Stop if next line is a new list/block type or empty
+                        if not next_line_stripped or next_line_stripped.startswith(('#', '- ', '* ')) or re.match(r'^\d+[\.\)]\s', next_line_stripped):
+                            break
+                        text_content += '\n' + next_line
+                        item_content_end_index += 1
+
+                    # Create and append the list item block
+                    rich_text = parse_inline_formatting(text_content)
+                    block = {"object": "block", "type": block_type, block_type: {"rich_text": rich_text}}
+                    children_blocks.append(block)
+
+                    # Move master index 'i' to the next item
+                    i = item_content_end_index
+                
+                continue # Finished processing the list, restart main while loop
+
+            # 일반 문단 (Paragraphs) - Fallback
+            text_content = line
+            i += 1
+            # Consume subsequent lines until a new block starts
+            while i < len(lines):
+                next_line = lines[i]
+                next_line_stripped = next_line.strip()
+                if not next_line_stripped or \
+                    next_line_stripped.startswith(('#', '- ', '* ')) or \
+                    re.match(r'^\d+[\.\)]\s', next_line_stripped):
+                    break
+                text_content += '\n' + next_line
                 i += 1
             
-            # 목록 (Lists) - 여러 줄로 된 항목 처리
-            elif stripped_line.startswith(('- ', '* ')) or re.match(r'^\d+\.\s', stripped_line):
-                is_numbered = re.match(r'^\d+\.\s', stripped_line)
-                
-                if is_numbered:
-                    text_content = re.sub(r'^\d+\.\s', '', stripped_line)
-                else:
-                    text_content = stripped_line[2:]
-
-                i += 1
-                while (i < len(lines) and lines[i] and 
-                       not lines[i].strip().startswith(('- ', '* ', '#')) and 
-                       not re.match(r'^\d+\.\s', lines[i].strip())):
-                    text_content += '\n' + lines[i]
-                    i += 1
-                
-                rich_text = parse_inline_formatting(text_content)
-
-                if is_numbered:
-                    block = {"object": "block", "type": "numbered_list_item", "numbered_list_item": {"rich_text": rich_text}}
-                else:
-                    block = {"object": "block", "type": "bulleted_list_item", "bulleted_list_item": {"rich_text": rich_text}}
-
-            # 일반 문단 (Paragraphs)
-            else:
-                text_content = line
-                i += 1
-                while (i < len(lines) and lines[i] and 
-                       not lines[i].strip().startswith(('- ', '* ', '#')) and 
-                       not re.match(r'^\d+\.\s', lines[i].strip())):
-                    text_content += '\n' + lines[i]
-                    i += 1
-                block = {"object": "block", "type": "paragraph", "paragraph": {"rich_text": parse_inline_formatting(text_content)}}
-
-            if block:
-                children_blocks.append(block)
+            block = {"object": "block", "type": "paragraph", "paragraph": {"rich_text": parse_inline_formatting(text_content)}}
+            children_blocks.append(block)
 
         # --- Notion 페이지 생성 ---
         TITLE_PROPERTY_NAME = "이름"
