@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 from dateutil import parser as date_parser
 import notion_client
 
-
-load_dotenv()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # 한국 주요 언론사 RSS 피드
 RSS_FEEDS = {
