@@ -7,7 +7,7 @@ import html
 import requests 
 import argparse  # 커맨드라인 인자 처리용
 from urllib.parse import urlparse
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from dotenv import load_dotenv
@@ -26,6 +26,8 @@ RSS_FEEDS = {
     "서울경제": "https://www.sedaily.com/RSS/S01.xml",
 }
 
+KST = timezone(timedelta(hours=9))
+
 def _clean_html(text: str) -> str:
     """HTML 태그/엔티티 제거"""
     if not text:
@@ -34,10 +36,21 @@ def _clean_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", "", text)
     return text.strip()
 
-def collect_news_from_rss():
+def collect_news_from_rss(target_date=None):
     """RSS로 뉴스 수집 (fallback / 또는 기본)"""
     print("📰 RSS로 뉴스 수집 시작...")
     all_articles = []
+    target_day = None
+
+    if target_date:
+        try:
+            target_day = datetime.strptime(target_date, "%Y-%m-%d").date()
+            print(f"📅 수집 대상 날짜: {target_day.strftime('%Y년 %m월 %d일')}\n")
+        except ValueError:
+            print(f"❌ 잘못된 날짜 형식: {target_date} (YYYY-MM-DD 형식 필요)")
+            return []
+    else:
+        print("📅 수집 대상 날짜: 전체(피드 최신 기사)\n")
 
     for source, url in RSS_FEEDS.items():
         try:
@@ -46,13 +59,33 @@ def collect_news_from_rss():
 
             count = 0
             for entry in feed.entries[:100]:
+                published_raw = entry.get("published", "")
+
+                if target_day is not None:
+                    entry_date = None
+                    try:
+                        if entry.get("published_parsed"):
+                            parsed = entry.published_parsed
+                            dt_utc = datetime(*parsed[:6], tzinfo=timezone.utc)
+                            entry_date = dt_utc.astimezone(KST).date()
+                        elif published_raw:
+                            dt = date_parser.parse(published_raw)
+                            if dt.tzinfo is None:
+                                dt = dt.replace(tzinfo=KST)
+                            entry_date = dt.astimezone(KST).date()
+                    except Exception:
+                        entry_date = None
+
+                    if entry_date != target_day:
+                        continue
+
                 title = _clean_html(entry.get("title", ""))
                 summary = _clean_html(entry.get("summary", ""))[:500]
 
                 article = {
                     "title": title,
                     "link": entry.get("link", ""),
-                    "published": entry.get("published", ""),
+                    "published": published_raw,
                     "summary": summary,
                     "source": source,
                     "originallink": entry.get("link", ""),  # RSS는 보통 link가 원문
@@ -82,25 +115,24 @@ def collect_news_from_naver(target_date=None):
     # 날짜 설정
     if target_date:
         try:
-            target = datetime.strptime(target_date, "%Y-%m-%d")
-            print(f"📅 수집 대상 날짜: {target.strftime('%Y년 %m월 %d일')}\n")
+            target_day = datetime.strptime(target_date, "%Y-%m-%d").date()
+            print(f"📅 수집 대상 날짜: {target_day.strftime('%Y년 %m월 %d일')}\n")
+            day_gap = (datetime.now(KST).date() - target_day).days
+            if day_gap > 180:
+                print("⚠️  대상 날짜가 많이 과거입니다. 네이버 검색 API(최대 1000건) 한계로 0건일 수 있습니다.\n")
         except ValueError:
             print(f"❌ 잘못된 날짜 형식: {target_date} (YYYY-MM-DD 형식 필요)")
             return []
     else:
-        target = datetime.now()
-        print(f"📅 수집 대상 날짜: 오늘 ({target.strftime('%Y년 %m월 %d일')})\n")
-    
-    # 날짜 범위 설정 (해당 날짜 00:00 ~ 23:59)
-    start_of_day = target.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_of_day = target.replace(hour=23, minute=59, second=59, microsecond=999999)
+        target_day = datetime.now(KST).date()
+        print(f"📅 수집 대상 날짜: 오늘 ({target_day.strftime('%Y년 %m월 %d일')})\n")
 
     client_id = os.getenv("NAVER_CLIENT_ID")
     client_secret = os.getenv("NAVER_CLIENT_SECRET")
 
     if not client_id or not client_secret:
         print("❌ 네이버 API 키가 없습니다. RSS로 대체합니다.\n")
-        return collect_news_from_rss()
+        return collect_news_from_rss(target_date=target_date)
 
     keywords = [
         "금융", "증시", "주식", "환율", "증권", "캐피탈", 
@@ -115,66 +147,114 @@ def collect_news_from_naver(target_date=None):
         "X-Naver-Client-Secret": client_secret
     }
 
+    def _to_kst_date(pub_date_str):
+        if not pub_date_str:
+            return None
+        try:
+            pub_date = date_parser.parse(pub_date_str)
+            if pub_date.tzinfo is None:
+                pub_date = pub_date.replace(tzinfo=KST)
+            return pub_date.astimezone(KST).date()
+        except Exception:
+            return None
+
     all_articles = []
+    display = 100
+    max_start = 1000  # 네이버 검색 API start 파라미터 상한
+
     for keyword in keywords:
         try:
             print(f"  → '{keyword}' 검색 중...")
-
-            params = {"query": keyword, "display": 100, "sort": "date"}
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-
-            if response.status_code != 200:
-                print(f"     ✗ 오류: {response.status_code}")
-                continue
-
-            data = response.json()
             count = 0
-            for item in data.get("items", []):
-                # ✅ 날짜 필터링 추가
-                pub_date_str = item.get("pubDate", "")
-                if pub_date_str:
-                    try:
-                        # 네이버 pubDate 형식: "Mon, 09 Jan 2026 14:30:00 +0900"
-                        pub_date = date_parser.parse(pub_date_str)
-                        
-                        # 지정된 날짜가 아니면 스킵
-                        if not (start_of_day <= pub_date <= end_of_day):
-                            continue
-                    except Exception as e:
-                        # 날짜 파싱 실패하면 일단 포함
-                        pass
-                
-                title = _clean_html(item.get("title", ""))
-                description = _clean_html(item.get("description", ""))[:500]
+            start = 1
+            reached_api_limit_without_target = False
 
-                originallink = item.get("originallink") or ""
-                link = item.get("link") or originallink
-
-                source_domain = "네이버뉴스"
-                try:
-                    if originallink:
-                        source_domain = urlparse(originallink).netloc or "네이버뉴스"
-                except Exception:
-                    pass
-
-                article = {
-                    "title": title,
-                    "link": link,
-                    "published": pub_date_str,
-                    "summary": description,
-                    "source": source_domain,
-                    "originallink": originallink,
+            while start <= max_start:
+                params = {
+                    "query": keyword,
+                    "display": display,
+                    "sort": "date",
+                    "start": start,
                 }
+                response = requests.get(url, headers=headers, params=params, timeout=10)
 
-                if article["title"]:
-                    all_articles.append(article)
-                    count += 1
+                if response.status_code != 200:
+                    print(f"     ✗ 오류: {response.status_code} (start={start})")
+                    break
+
+                data = response.json()
+                items = data.get("items", [])
+                if not items:
+                    break
+
+                page_oldest_day = None
+                for item in items:
+                    pub_date_str = item.get("pubDate", "")
+                    pub_day = _to_kst_date(pub_date_str)
+                    if pub_day is None:
+                        continue
+
+                    if page_oldest_day is None or pub_day < page_oldest_day:
+                        page_oldest_day = pub_day
+
+                    # 지정된 날짜가 아니면 스킵 (KST 기준 일자 비교)
+                    if pub_day != target_day:
+                        continue
+
+                    title = _clean_html(item.get("title", ""))
+                    description = _clean_html(item.get("description", ""))[:500]
+
+                    originallink = item.get("originallink") or ""
+                    link = item.get("link") or originallink
+
+                    source_domain = "네이버뉴스"
+                    try:
+                        if originallink:
+                            source_domain = urlparse(originallink).netloc or "네이버뉴스"
+                    except Exception:
+                        pass
+
+                    article = {
+                        "title": title,
+                        "link": link,
+                        "published": pub_date_str,
+                        "summary": description,
+                        "source": source_domain,
+                        "originallink": originallink,
+                    }
+
+                    if article["title"]:
+                        all_articles.append(article)
+                        count += 1
+
+                # 오늘 수집 모드는 첫 페이지만 조회
+                if target_date is None:
+                    break
+
+                # 결과가 날짜 내림차순이므로, 페이지 최솟값이 target_day보다 작아지면 종료
+                if page_oldest_day and page_oldest_day < target_day:
+                    break
+
+                if start == max_start and page_oldest_day and page_oldest_day > target_day and count == 0:
+                    reached_api_limit_without_target = True
+
+                start += display
+                time.sleep(0.12)
 
             print(f"     ✓ {count}개 수집")
+            if target_date and count == 0 and reached_api_limit_without_target:
+                print("     ⚠️  API 최대 1000건 범위에서 해당 날짜까지 내려가지 못했습니다.")
+
             time.sleep(0.12)
 
         except Exception as e:
             print(f"     ✗ 오류: {e}")
+
+    if target_date and not all_articles:
+        print("⚠️  네이버에서 대상 날짜 기사 0건입니다. RSS 폴백을 시도합니다.\n")
+        rss_articles = collect_news_from_rss(target_date=target_date)
+        if rss_articles:
+            return rss_articles
 
     print(f"\n총 {len(all_articles)}개 기사 수집 완료!\n")
     return all_articles
@@ -253,19 +333,21 @@ def summarize_news(articles):
 {articles_text}
 
 요구사항:
-- 결과는 **A4 3페이지 이내(약 2000~2400자)**로 제한
-- 중복 이슈는 반드시 통합 (같은 이슈 기사 여러 개면 1개로 묶어서)
-- 섹션별 분량을 지켜 과도하게 길어지지 않게
-- 각 섹션 제목은 h1으로
+- **카테고리 분류 기준**:
+  - '경제' 섹션: 은행, 증권, 보험, 카드, 자산운용 등 금융기관 관련 소식. 기업의 실적 발표, 투자, M&A, 지분 변동, 정부의 경제 정책 등.
+  - 'IT/기술' 섹션: 인공지능(AI), 소프트웨어, 하드웨어, 통신, 블록체인, 플랫폼 기업(네이버, 카카오 등) 관련 소식. 기술 개발, 신제품 출시, IT 서비스 업데이트 등.
+  - 기사 내용이 두 섹션에 모두 해당될 경우, **더 핵심적인 주제가 되는 섹션에만 포함**시키세요. 예를 들어 '은행의 AI 도입'은 '경제' 섹션에 더 가깝습니다.
+- **중복 이슈 통합**: 내용이 유사하거나 같은 사건을 다루는 기사는 **반드시 하나의 항목으로 통합**하여 요약하세요. 절대로 같은 내용의 기사가 다른 섹션이나 여러 항목으로 중복 등장해서는 안 됩니다.
+- **분량**: 결과는 한 뉴스기사당 **5줄-8줄** 유지해주고, 각 섹션별 분량을 균등하게 유지하세요.
+- **형식**: 각 섹션 제목은 '# 경제 TOP 10'과 같이 마크다운 h1 형식(#)을 사용하세요.
 
 출력 형식:
 1) 오늘의 핵심 5줄
-2) 경제 TOP 10 (각 6~8줄)
-3) IT/기술 TOP 10 (각 6~8줄)
+2) # 경제 TOP 10 (각 6~8줄, 숫자목록, IT/기술 부문과 겹치지 않는 topic)
+3) # IT/기술 TOP 10 (각 6~8줄, 숫자목록, 경제부문과 겹치지 않는 topic)
 4) 공통 트렌드 5~8줄
-5) 내일 관전 포인트 5줄
-6) 출처 링크(이슈별 대표 링크 1개씩)
-7) 인사이트 추출
+5) 출처 링크(이슈별 대표 링크 1개씩)
+6) 금융권 개발자를 지망하는 취업준비생을 위한 인사이트 추출
 """
 
     try:
