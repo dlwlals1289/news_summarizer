@@ -1,8 +1,8 @@
 #!/bin/bash
 set -u
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 LOG_DIR="$PROJECT_DIR/logs"
 
 mkdir -p "$LOG_DIR"

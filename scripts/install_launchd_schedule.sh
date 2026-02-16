@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 RUN_SCRIPT="$PROJECT_DIR/scripts/run_daily_news.sh"
 LABEL="com.news-summarizer.daily"
 PLIST_DIR="$HOME/Library/LaunchAgents"
@@ -23,11 +23,9 @@ cat > "$PLIST_PATH" <<EOF
 
   <key>ProgramArguments</key>
   <array>
+    <string>/bin/bash</string>
     <string>$RUN_SCRIPT</string>
   </array>
-
-  <key>WorkingDirectory</key>
-  <string>$PROJECT_DIR</string>
 
   <key>StartCalendarInterval</key>
   <dict>
@@ -53,4 +51,3 @@ launchctl enable "gui/$(id -u)/$LABEL"
 echo "Installed launchd job: $LABEL"
 echo "Plist path: $PLIST_PATH"
 echo "Schedule: every day at 18:00"
-
